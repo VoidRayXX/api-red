@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl:*)",
+      "Bash(go build:*)",
+      "Read(//c/Users/VOID/Desktop//**)",
+      "Read(//c/Users/VOID/Desktop/**)",
+      "Bash(python3:*)"
+    ]
+  }
+}

@@ -6,7 +6,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron"
-	"github.com/xorcl/api-red/balance"
 	"github.com/xorcl/api-red/bus"
 	"github.com/xorcl/api-red/busstop"
 	"github.com/xorcl/api-red/common"
@@ -38,8 +37,8 @@ type Parser interface {
 }
 
 func main() {
+	gin.SetMode(gin.ReleaseMode)
 	parsers := []Parser{
-		&balance.Parser{},
 		&busstop.Parser{},
 		&metronetwork.Parser{},
 		&bus.Parser{},

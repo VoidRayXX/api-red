@@ -3,7 +3,7 @@ package bus
 import (
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -12,11 +12,10 @@ import (
 	"github.com/xorcl/api-red/common"
 )
 
-const BASE_URL = "https://www.red.cl/predictor/prediccion?t=%s&codsimt=%s&codser="
+const BASE_URL = "https://www.red.cl/predictorPlus/prediccion?t=%s&codsimt=%s&codser="
 const SESSION_URL = "https://www.red.cl/planifica-tu-viaje/cuando-llega/"
 
 type Parser struct {
-	Request       *http.Request
 	Session       string
 	BusStopRegexp *regexp.Regexp
 }
@@ -26,11 +25,11 @@ func (bp *Parser) GetRoute() string {
 }
 
 func (bp *Parser) StartParser() {
-	bp.BusStopRegexp = regexp.MustCompile("\\$jwt = '([A-Za-z0-9=-_]+)'")
+	bp.BusStopRegexp = regexp.MustCompile(`\$jwt = '([A-Za-z0-9+/=_-]+)'`)
 }
 
 func (bp *Parser) Parse(c *gin.Context) {
-	bp.getSession() // TODO: Get the session only once
+	bp.getSession()
 	stopID := c.Param("stopid")
 	url := fmt.Sprintf(BASE_URL, bp.Session, stopID)
 	response, err := http.Get(url)
@@ -47,7 +46,6 @@ func (bp *Parser) Parse(c *gin.Context) {
 }
 
 func (bp *Parser) StopParser() {
-
 }
 
 func (bp *Parser) getSession() {
@@ -56,18 +54,21 @@ func (bp *Parser) getSession() {
 		log.Printf("Error getting session for bus parser: %s", err)
 		return
 	}
-	// read all body
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
 		log.Printf("Error reading session page for bus parser: %s", err)
 		return
 	}
-	resp.Body.Close()
-	// find jwt
 	jwtB64 := bp.BusStopRegexp.FindSubmatch(body)
+	if jwtB64 == nil {
+		log.Printf("Error getting session for bus parser: JWT not found in page")
+		return
+	}
 	jwt, err := base64.StdEncoding.DecodeString(string(jwtB64[1]))
 	if err != nil {
 		log.Printf("Error decoding jwt for bus parser: %s", err)
+		return
 	}
 	bp.Session = string(jwt)
 }

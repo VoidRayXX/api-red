@@ -43,9 +43,9 @@ func (bp *Parser) Parse(c *gin.Context) {
 	resp, err := http.Get(URL)
 	if err != nil {
 		logrus.Errorf("Error retrieving Metro page: %s", err)
-
 		response.APIStatus = "Error al conectarse al sitio de Metro"
 		c.JSON(400, &response)
+		return
 	}
 	defer resp.Body.Close()
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
@@ -157,8 +157,8 @@ func (p *Parser) GetCronTasks() []*common.CronTask {
 						logrus.Errorf("Error retrieving %s station schedule page: %s", name, err)
 						continue
 					}
-					defer resp.Body.Close()
 					err = json.NewDecoder(resp.Body).Decode(&sr)
+					resp.Body.Close()
 					if err != nil {
 						logrus.Errorf("Error parsing Metro Status body: %s", err)
 						continue

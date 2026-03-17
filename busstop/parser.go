@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gin-gonic/gin"
@@ -19,6 +20,7 @@ type Parser struct {
 	Request       *http.Request
 	Session       string
 	BusStopRegexp *regexp.Regexp
+	Client        *http.Client
 }
 
 func (bp *Parser) GetRoute() string {
@@ -26,6 +28,7 @@ func (bp *Parser) GetRoute() string {
 }
 
 func (bp *Parser) StartParser() {
+	bp.Client = &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", SESSION_URL, nil)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
@@ -39,7 +42,6 @@ func (bp *Parser) StartParser() {
 }
 
 func (bp *Parser) Parse(c *gin.Context) {
-	bp.getSession() // TODO: Get the session only once
 	stopID := c.Param("stopid")
 	response := Response{
 		Services: make([]*ServiceResponse, 0),
@@ -63,49 +65,40 @@ func (bp *Parser) Parse(c *gin.Context) {
 		return
 	}
 	response.ID = stopID
-	form := url.Values{}
-	form.Add("d", "busquedaParadero")
-	form.Add("ingresar_paradero", stopID)
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s?%s", BASE_URL, form.Encode()), nil)
-	if err != nil {
-		response.SetStatus(20)
-		logrus.WithFields(logrus.Fields{
-			"error": response.StatusDescription,
-		}).Errorf("error creating Bus Stop Request: %s", err)
-		c.JSON(400, &response)
-		// bp.getSession()
-		return
-	}
-	req.Header.Add("Cookie", fmt.Sprintf("JSESSIONID=%s", bp.Session))
-	resp, err := http.DefaultClient.Do(req)
+
+	doc, err := bp.fetchStop(stopID)
 	if err != nil {
 		response.SetStatus(21)
 		logrus.WithFields(logrus.Fields{
 			"error": response.StatusDescription,
-		}).Errorf("error parsing Bus Stop Schedule: %s", err)
-		// bp.getSession()
+		}).Errorf("error fetching Bus Stop: %s", err)
 		c.JSON(400, &response)
 		return
 	}
-	defer resp.Body.Close()
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		response.SetStatus(20)
-		logrus.WithFields(logrus.Fields{
-			"error": response.StatusDescription,
-		}).Error("error parsing Bus Stop Schedule: %s", err)
-		// bp.getSession()
-		c.JSON(400, &response)
-		return
-	}
+
 	var serviceNumber string
 	response.ID, response.Name, response.StatusDescription, serviceNumber = getStopData(doc)
+	if len(response.Name) == 0 {
+		// Session likely expired — refresh and retry once
+		logrus.Info("empty bus stop response, refreshing session and retrying...")
+		bp.getSession()
+		doc, err = bp.fetchStop(stopID)
+		if err != nil {
+			response.SetStatus(21)
+			logrus.WithFields(logrus.Fields{
+				"error": response.StatusDescription,
+			}).Errorf("error fetching Bus Stop after session refresh: %s", err)
+			c.JSON(400, &response)
+			return
+		}
+		response.ID, response.Name, response.StatusDescription, serviceNumber = getStopData(doc)
+	}
+
 	if len(response.Name) == 0 {
 		response.SetStatus(20)
 		logrus.WithFields(logrus.Fields{
 			"error": response.StatusDescription,
 		}).Error("error parsing Bus Stop Schedule: Empty response")
-		// bp.getSession()
 		c.JSON(400, &response)
 		return
 	}
@@ -113,8 +106,7 @@ func (bp *Parser) Parse(c *gin.Context) {
 		response.StatusCode = 30
 		logrus.WithFields(logrus.Fields{
 			"error": response.StatusDescription,
-		}).Error("error parsing Bus Stop Schedule: %s", err)
-		// bp.getSession()
+		}).Error("error parsing Bus Stop Schedule: stop returned error status")
 		c.JSON(400, &response)
 		return
 	}
@@ -128,13 +120,32 @@ func (bp *Parser) Parse(c *gin.Context) {
 	c.JSON(200, &response)
 }
 
-func (bp *Parser) StopParser() {
+func (bp *Parser) fetchStop(stopID string) (*goquery.Document, error) {
+	form := url.Values{}
+	form.Add("d", "busquedaParadero")
+	form.Add("ingresar_paradero", stopID)
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s?%s", BASE_URL, form.Encode()), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Add("Cookie", fmt.Sprintf("JSESSIONID=%s", bp.Session))
+	resp, err := bp.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
 
+func (bp *Parser) StopParser() {
 }
 
 func (bp *Parser) getSession() {
-	client := http.Client{}
-	resp, err := client.Do(bp.Request)
+	resp, err := bp.Client.Do(bp.Request)
 	if err != nil {
 		logrus.Error("Cannot get Session: %s", err)
 		return
