@@ -5,25 +5,23 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/gin-gonic/gin"
 	"github.com/gosimple/slug"
 	"github.com/sirupsen/logrus"
 	"github.com/xorcl/api-red/common"
 )
 
-const STATUS_SELECTOR = "#estadoRed .row.pTop30 > .col-md-12 > .row"
-const ESTACION_SELECTOR = ".estadoEstaciones > li"
-const URL = "https://metro.cl/tu-viaje/estado-red"
 const KeyValURL = "https://www.metro.cl/api/estadoRedDetalle.php"
 const TimeURL = "https://www.metro.cl/api/horariosEstacion.php?cod=%s"
 const HolidayURL = "https://apis.digital.gob.cl/fl/feriados/%d/%d/%d"
 
+var slugRegex = regexp.MustCompile(`-l\da?$`)
+
 type Parser struct {
-	HTTPRequest  http.Request
 	StationTimes map[string]*CompositeTime
 	IsHoliday    bool
 }
@@ -40,88 +38,115 @@ func (bp *Parser) Parse(c *gin.Context) {
 		Lines: make([]*LineResponse, 0),
 		Time:  time.Now().Format("2006-01-02 15:04:05"),
 	}
-	resp, err := http.Get(URL)
+
+	resp, err := http.Get(KeyValURL)
 	if err != nil {
-		logrus.Errorf("Error retrieving Metro page: %s", err)
+		logrus.Errorf("Error retrieving Metro Status: %s", err)
 		response.APIStatus = "Error al conectarse al sitio de Metro"
 		c.JSON(400, &response)
 		return
 	}
 	defer resp.Body.Close()
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
+
+	kv := make(KeyValResponse)
+	err = json.NewDecoder(resp.Body).Decode(&kv)
 	if err != nil {
-		response.APIStatus = "Error al procesar sitio de Metro"
-		logrus.Errorf("Error parsing Metro page: %s", err)
+		logrus.Errorf("Error parsing Metro Status: %s", err)
+		response.APIStatus = "Error al procesar datos de Metro"
 		c.JSON(400, &response)
 		return
 	}
-	transfer_stations := make(map[string][]string)
-	doc.Find(STATUS_SELECTOR).First().Children().Each(func(i int, s *goquery.Selection) {
+
+	// Sort line keys for consistent ordering (l1, l2, l3, l4, l4a, l5, l6)
+	lineKeys := make([]string, 0, len(kv))
+	for k := range kv {
+		lineKeys = append(lineKeys, k)
+	}
+	sort.Strings(lineKeys)
+
+	transferStations := make(map[string][]string)
+
+	for _, key := range lineKeys {
+		lineData := kv[key]
+		lineID := strings.ToUpper(key)
+		lineNum := strings.TrimPrefix(lineID, "L")
+
+		lineStatus := stringToStatusCode[lineData.Estado]
 		line := &LineResponse{
+			Name:     "Línea " + lineNum,
+			ID:       lineID,
+			Issues:   lineStatus != 0,
 			Stations: make([]*StationResponse, 0),
 		}
-		lineNumber := strings.ToUpper(strings.TrimLeft(s.Find("strong").First().Text(), "Línea "))
-		line.Name = "Línea " + lineNumber
-		line.ID = "L" + lineNumber
-		s.Find(ESTACION_SELECTOR).Each(func(i int, t *goquery.Selection) {
-			description, exists := t.Attr("title")
-			if !exists {
-				return
-			}
-			class, exists := t.Attr("class")
-			if !exists {
-				return
-			}
-			status, exists := ToStatusCode[class]
-			if !exists {
-				return
-			}
-			if status != 0 {
+		if line.Issues {
+			response.Issues = true
+		}
+
+		for _, stData := range lineData.Estaciones {
+			stStatus := stringToStatusCode[stData.Estado]
+			if stStatus != 0 {
 				line.Issues = true
 				response.Issues = true
 			}
-			name := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(t.Nodes[0].FirstChild.Data), line.ID))
-			var reason string
-			if t.Nodes[0].FirstChild.NextSibling != nil {
-				reason = strings.TrimSpace(t.Find(".popover-body").Text())
+
+			// Strip line suffix from display name ("San Pablo L1" -> "San Pablo")
+			name := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(stData.Nombre), " "+lineID))
+			stSlug := slugRegex.ReplaceAllString(slug.Make(strings.TrimSpace(stData.Nombre)), "")
+
+			// Track which lines each station belongs to
+			transferStations[name] = append(transferStations[name], lineID)
+			if stData.Combinacion != "" {
+				comboID := strings.ToUpper(strings.TrimSpace(stData.Combinacion))
+				transferStations[name] = append(transferStations[name], comboID)
 			}
-			transfer_stations[name] = append(transfer_stations[name], line.ID)
+
 			station := &StationResponse{
 				Name:        name,
-				ID:          slug.Make(strings.TrimSpace(name)),
-				Status:      status,
-				Description: strings.TrimSpace(description),
-				Reason:      reason,
+				ID:          stSlug,
+				Status:      stStatus,
+				Description: strings.TrimSpace(stData.Descripcion),
+				Reason:      strings.TrimSpace(stData.Mensaje),
 			}
-			if time, ok := bp.StationTimes[station.ID]; ok {
-				station.Schedule = time
-				if closed, err := time.IsClosed(bp.IsHoliday); closed && err == nil {
+
+			if ct, ok := bp.StationTimes[stSlug]; ok {
+				station.Schedule = ct
+				if closed, err := ct.IsClosed(bp.IsHoliday); closed && err == nil {
 					station.IsClosedBySchedule = true
-					line.StationsClosedBySchedule += 1
+					line.StationsClosedBySchedule++
 				}
 			}
+
 			line.Stations = append(line.Stations, station)
-		})
+		}
+
 		response.Lines = append(response.Lines, line)
-	})
-	response.APIStatus = "OK"
-	// we just need to set the combinations
+	}
+
+	// Set deduplicated transfer lines for each station
 	for _, line := range response.Lines {
 		for _, station := range line.Stations {
-			if lines, ok := transfer_stations[station.Name]; ok {
-				station.Lines = lines
+			if lines, ok := transferStations[station.Name]; ok {
+				seen := make(map[string]bool)
+				unique := make([]string, 0)
+				for _, l := range lines {
+					if !seen[l] {
+						seen[l] = true
+						unique = append(unique, l)
+					}
+				}
+				station.Lines = unique
 			}
 		}
 	}
+
+	response.APIStatus = "OK"
 	c.JSON(200, &response)
 }
 
 func (bp *Parser) StopParser() {
-
 }
 
 func (p *Parser) GetCronTasks() []*common.CronTask {
-	regex := regexp.MustCompile(`-l\da?$`)
 	return []*common.CronTask{
 		{
 			Name: "Get all stations",
@@ -143,8 +168,8 @@ func (p *Parser) GetCronTasks() []*common.CronTask {
 				}
 				for _, v := range kv {
 					for _, station := range v.Estaciones {
-						slug := strings.TrimSpace(slug.Make(station.Nombre))
-						completeNames[station.Codigo] = regex.ReplaceAllString(slug, "")
+						stSlug := strings.TrimSpace(slug.Make(station.Nombre))
+						completeNames[station.Codigo] = slugRegex.ReplaceAllString(stSlug, "")
 					}
 				}
 				p.StationTimes = make(map[string]*CompositeTime)

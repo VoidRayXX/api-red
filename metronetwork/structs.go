@@ -33,9 +33,15 @@ type StationResponse struct {
 }
 
 type KeyValResponse map[string]struct {
+	Estado    string `json:"estado"`
+	Mensaje   string `json:"mensaje"`
 	Estaciones []struct {
-		Nombre string `json:"nombre"`
-		Codigo string `json:"codigo"`
+		Nombre      string `json:"nombre"`
+		Codigo      string `json:"codigo"`
+		Estado      string `json:"estado"`
+		Combinacion string `json:"combinacion"`
+		Descripcion string `json:"descripcion"`
+		Mensaje     string `json:"mensaje"`
 	} `json:"estaciones"`
 }
 
@@ -51,7 +57,6 @@ type OpenCloseResponse struct {
 
 type ScheduleResponse struct {
 	Estacion OpenCloseResponse `json:"estacion"`
-	//	Boleteria OpenCloseResponse `json:""`
 }
 
 type WeekTime struct {
@@ -103,9 +108,9 @@ func (ct *CompositeTime) IsClosed(isHoliday bool) (bool, error) {
 
 type StatusCode int
 
-var ToStatusCode = map[string]StatusCode{
-	"estado1": 0,
-	"estado2": 1,
-	"estado3": 2,
-	"estado4": 3,
+var stringToStatusCode = map[string]StatusCode{
+	"1": 0,
+	"2": 1,
+	"3": 2,
+	"4": 3,
 }

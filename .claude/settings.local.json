@@ -5,7 +5,8 @@
       "Bash(go build:*)",
       "Read(//c/Users/VOID/Desktop//**)",
       "Read(//c/Users/VOID/Desktop/**)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(grep -c '\"\"nombre\"\"' /tmp/metro_test.json)"
     ]
   }
 }
